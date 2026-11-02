@@ -1,0 +1,128 @@
+/* ALPHA-O Automate platform styles. Loads AFTER automate.css and reuses its tokens
+   (--bg, --surface, --raised, --border, --amber [cyan], --muted, --success, --danger, --warn). */
+
+.automate-app { width: min(100%, 1280px); }
+.ap-muted { color: var(--muted); font-size: 12px; }
+.ap-bad { color: var(--danger); } .ap-ok { color: var(--success); } .ap-warn { color: var(--warn, #ffc857); } .ap-done { text-decoration: line-through; opacity: 0.7; }
+.ap-mono, code, .ap-mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12px; }
+code { padding: 1px 6px; border-radius: 6px; background: var(--raised); }
+.ap-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ap-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+.ap-grow { flex: 1; min-width: 0; }
+.ap-h4 { margin: 16px 0 8px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--blue); }
+.ap-danger { color: var(--danger); border-color: rgba(255, 125, 136, 0.5); }
+.ap-green { background: linear-gradient(135deg, #8ff0c6, var(--success) 50%, #2fae7c); }
+.ai-btn, .ap-ai { border-color: rgba(143, 168, 255, 0.55); color: #c7d3ff; }
+.ap-ai::before { content: "✦ "; color: var(--violet); }
+.ap-loading, .ap-empty { padding: 26px 12px; text-align: center; color: var(--muted); }
+.ap-badge-warn { color: var(--warn, #ffc857); border-color: rgba(255, 200, 87, 0.45); background: rgba(255, 200, 87, 0.08); }
+
+/* Navigation */
+.ap-nav { position: sticky; top: 82px; z-index: 15; display: flex; align-items: center; gap: 12px; padding: 8px 0 12px; background: linear-gradient(var(--bg) 80%, transparent); }
+.ap-tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; scrollbar-width: thin; padding-bottom: 2px; }
+.ap-tabs button { position: relative; flex: none; padding: 8px 14px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--muted); font-weight: 600; font-size: 13px; white-space: nowrap; }
+.ap-tabs button:hover { color: var(--text); background: var(--surface); }
+.ap-tabs button[aria-selected="true"] { color: var(--amber); border-color: rgba(79, 211, 255, 0.4); background: var(--amber-soft); }
+.ap-count { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--danger); color: #1a0508; font-size: 10px; font-weight: 800; }
+.ap-user { display: flex; align-items: center; gap: 10px; flex: none; }
+.ap-user-text { display: flex; flex-direction: column; text-align: right; line-height: 1.25; font-size: 12px; } .ap-user-text span { color: var(--muted); font-size: 11px; }
+
+.ap-view { padding-bottom: 36px; animation: card-in 0.2s ease-out; }
+.ap-gate-card { margin-top: 12px; }
+.section-heading { flex-wrap: wrap; }
+.section-heading h2 { margin: 0; }
+
+/* Panels and lists */
+.ap-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+.ap-panel { min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: 14px; }
+.ap-grid2 > .ap-panel { margin-bottom: 0; }
+.ap-panel .engine-subheading { margin-bottom: 12px; }
+.ap-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 18px; }
+.ap-stat .stat-value { font-size: 30px; }
+.tone-ok { color: var(--success); } .tone-bad { color: var(--danger); }
+.ap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ap-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+li.ap-row[onclick], .ap-row[role="button"] { cursor: pointer; } .ap-row:hover { border-color: var(--border-strong); }
+.ap-row.unread { border-color: rgba(79, 211, 255, 0.5); box-shadow: inset 3px 0 0 var(--amber); }
+.ap-row-split { display: flex; justify-content: space-between; gap: 8px; }
+.ap-bar { height: 7px; margin: 6px 0; border-radius: 99px; background: var(--raised); overflow: hidden; } .ap-bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--amber-deep), var(--success)); }
+.ap-note-attention { box-shadow: inset 3px 0 0 var(--danger); } .ap-note-warning { box-shadow: inset 3px 0 0 var(--warn, #ffc857); } .ap-note-success { box-shadow: inset 3px 0 0 var(--success); }
+.ap-steps { padding-left: 20px; } .ap-steps li { margin-bottom: 8px; }
+.ap-tablewrap { overflow-x: auto; }
+.ap-table { width: 100%; border-collapse: collapse; font-size: 12px; } .ap-table th, .ap-table td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; } .ap-table th { color: var(--muted); font-weight: 600; text-transform: capitalize; }
+.ap-form { display: grid; gap: 10px; } .ap-form-row { display: grid; grid-template-columns: 130px 1fr; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ap-check { display: inline-flex; align-items: center; gap: 6px; margin: 4px 12px 4px 0; font-size: 13px; } .ap-days { display: flex; flex-wrap: wrap; margin-bottom: 8px; }
+
+/* Workflow cards */
+.ap-wf-list { display: flex; flex-direction: column; gap: 10px; }
+.ap-wf { grid-template-columns: 1fr; align-items: stretch; }
+.ap-wf .workflow-card-actions { flex-wrap: wrap; }
+.ap-tpl-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.ap-tpl { cursor: default; } .ap-tpl .template-description { flex: 1; }
+.ap-status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; } .ap-unsaved { color: var(--warn, #ffc857); border-color: rgba(255, 200, 87, 0.5); }
+
+/* Executions */
+.ap-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.ap-chip { padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: transparent; font-size: 12px; font-weight: 600; color: var(--muted); }
+.ap-chip[aria-pressed="true"] { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
+.ap-ex-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 14px; align-items: start; }
+.ap-ex-list { display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
+.ap-ex-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 10px 12px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.ap-ex-row:hover { border-color: var(--border-strong); } .ap-ex-row.selected { border-color: rgba(79, 211, 255, 0.6); background: var(--raised); }
+.ap-ex-main { display: flex; flex-direction: column; min-width: 0; } .ap-ex-detail { position: sticky; top: 140px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); min-width: 0; max-height: 78vh; overflow-y: auto; }
+
+/* Modal */
+.ap-modal-back { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 16px; background: rgba(3, 6, 12, 0.72); backdrop-filter: blur(6px); animation: fade 0.18s ease-out; }
+.ap-modal { width: min(100%, 520px); max-height: calc(100vh - 32px); overflow-y: auto; padding: 20px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55); animation: pop 0.22s ease-out; }
+.ap-modal.wide { width: min(100%, 760px); }
+.ap-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; } .ap-modal-head h3 { font-family: "Rajdhani", "Inter", sans-serif; font-size: 22px; letter-spacing: 0.03em; }
+.ap-modal-body p { margin: 0 0 10px; } .ap-modal-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.ap-outline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; } .ap-outline.ap-mini { margin: 8px 0; font-size: 12px; }
+.ap-tag-true { color: var(--success); } .ap-tag-false { color: var(--warn, #ffc857); } .ap-tag-error { color: var(--danger); }
+
+/* Builder */
+.apb-shell { display: flex; flex-direction: column; gap: 10px; }
+.apb-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.apb-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 1; min-width: 180px; } .apb-title strong { font-family: "Rajdhani", "Inter", sans-serif; font-size: 20px; overflow-wrap: anywhere; }
+.apb-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ap-has-errors { color: var(--danger); border-color: rgba(255, 125, 136, 0.5); }
+.apb-body { display: grid; grid-template-columns: 190px minmax(0, 1fr) 300px; gap: 10px; align-items: stretch; min-height: 560px; }
+.apb-palette, .apb-inspector { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); overflow-y: auto; max-height: 72vh; }
+.apb-chip { display: block; width: 100%; margin-bottom: 6px; padding: 8px 10px; text-align: left; font-size: 12px; font-weight: 600; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg); cursor: grab; }
+.apb-chip:hover { border-color: var(--amber); background: var(--amber-soft); } .apb-chip.disabled { opacity: 0.55; border-style: dashed; }
+.apb-canvas { position: relative; min-height: 520px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: radial-gradient(circle at 1px 1px, rgba(79, 211, 255, 0.16) 1px, transparent 0) 0 0 / 22px 22px, var(--bg); }
+.apb-svg { width: 100%; height: 100%; min-height: 520px; display: block; touch-action: none; cursor: grab; outline: none; } .apb-svg:focus-visible { box-shadow: inset 0 0 0 2px var(--amber); }
+.apb-empty { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; pointer-events: none; padding: 20px; }
+.apb-card { fill: var(--raised); stroke: var(--border-strong); stroke-width: 1.5; } .apb-node { cursor: move; } .apb-node.selected .apb-card { stroke: var(--amber); stroke-width: 2.5; filter: drop-shadow(0 0 8px rgba(79, 211, 255, 0.4)); }
+.apb-node.has-error .apb-card { stroke: var(--danger); } .apb-node.disabled .apb-card { stroke-dasharray: 5 4; }
+.apb-title { fill: var(--text); font: 600 13px Inter, system-ui, sans-serif; } .apb-sub { fill: var(--muted); font: 11px Inter, system-ui, sans-serif; } .apb-badge { fill: #1a0508; font: 800 11px Inter, sans-serif; }
+.apb-port { fill: var(--bg); stroke: var(--amber); stroke-width: 2; cursor: crosshair; } .apb-port:hover { fill: var(--amber); } .apb-port.t { stroke: var(--success); } .apb-port.f { stroke: var(--warn, #ffc857); } .apb-port.err { stroke: var(--danger); }
+.apb-port-label, .apb-edge-label { fill: var(--muted); font: 10px Inter, sans-serif; pointer-events: none; }
+.apb-problems { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 8px 14px; } .apb-problems summary { cursor: pointer; font-weight: 600; color: var(--blue); } .ap-problems ul { margin: 8px 0 0; padding-left: 18px; }
+
+/* AI Copilot */
+.ap-copilot { position: fixed; top: 0; right: 0; bottom: 0; z-index: 70; display: flex; flex-direction: column; width: min(100%, 430px); border-left: 1px solid var(--border-strong); background: var(--surface); box-shadow: -20px 0 60px rgba(0, 0, 0, 0.5); animation: slide-in 0.22s ease-out; }
+.ap-copilot[hidden] { display: none !important; } @keyframes slide-in { from { transform: translateX(30px); opacity: 0; } }
+.ap-copilot-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); } .ap-copilot-head > div { display: flex; flex-direction: column; } .ap-copilot-head strong { font-family: "Rajdhani", sans-serif; letter-spacing: 0.1em; font-size: 17px; color: var(--amber); }
+.ap-copilot > .ap-chips { padding: 10px 16px 0; margin: 0; }
+.ap-ai-log { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+.ap-msg { padding: 10px 12px; border-radius: 14px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; } .ap-msg p { margin: 0 0 6px; }
+.ap-msg-user { align-self: flex-end; max-width: 88%; background: var(--amber-soft); border: 1px solid rgba(79, 211, 255, 0.3); } .ap-msg-ai { background: var(--raised); border: 1px solid var(--border); }
+.ap-msg-note { color: var(--muted); font-size: 12px; background: transparent; padding: 4px 2px; } .ap-progress { animation: run-pulse 1.2s ease-in-out infinite; } .ap-msg-error { background: rgba(255, 125, 136, 0.08); border: 1px solid rgba(255, 125, 136, 0.4); color: var(--danger); }
+.ap-changes { margin: 6px 0; padding-left: 18px; } .ap-prompts { padding: 0 16px 8px; display: flex; flex-direction: column; gap: 6px; max-height: 34vh; overflow-y: auto; }
+.ap-prompt { padding: 8px 10px; text-align: left; font-size: 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg); } .ap-prompt:hover { border-color: var(--amber); background: var(--amber-soft); }
+.ap-ai-input { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px 16px; border-top: 1px solid var(--border); } .ap-prov { margin: 8px 0 0; }
+@media (min-width: 1100px) { body.ap-copilot-open .automate-app { margin-right: min(430px, 34vw); } }
+
+.ap-tour h4 { margin: 4px 0 8px; font-size: 18px; } .ap-test-out { margin-top: 12px; }
+
+@media (max-width: 1000px) {
+  .ap-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ap-grid2, .ap-ex-grid { grid-template-columns: minmax(0, 1fr); } .ap-ex-detail { position: static; max-height: none; }
+  .apb-body { grid-template-columns: minmax(0, 1fr); min-height: 0; } .apb-palette { display: flex; flex-wrap: wrap; gap: 6px; max-height: none; } .apb-palette .engine-subheading, .apb-palette > p, .apb-palette .ap-h4 { width: 100%; margin: 4px 0; } .apb-chip { width: auto; margin: 0; }
+  .apb-inspector { max-height: none; } .apb-canvas, .apb-svg { min-height: 420px; }
+}
+@media (max-width: 640px) {
+  .ap-nav { top: 70px; flex-wrap: wrap; } .ap-user { width: 100%; justify-content: space-between; } .ap-user-text { text-align: left; }
+  .ap-stats { grid-template-columns: minmax(0, 1fr); } .ap-form-row { grid-template-columns: minmax(0, 1fr); } .ap-copilot { width: 100%; } .ap-modal-actions > * { flex: 1; }
+  .apb-top { flex-direction: column; align-items: stretch; } .apb-tools { justify-content: flex-start; }
+}

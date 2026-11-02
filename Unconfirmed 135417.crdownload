@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""
+ALPHA-O Automation: integrate automation-worker.js into your EXISTING Worker file.
+
+Usage:   python3 apply-worker-patch.py path/to/your-worker.js
+Result:  writes  your-worker.patched.js  next to it. Your original file is never modified.
+
+What it does (and nothing else):
+  1. Inserts ONE routing hook before the catch-all chat POST handler, so
+     /api/automation/* and /admin/automation/* are answered by the automation module
+     and never reach the chat persona.
+  2. Inserts ONE dispatch line at the top of scheduled(): the automation scheduler runs
+     only for its own cron expression ("* * * * *"). Every other cron expression still runs
+     your original 90-day cleanup unchanged.
+  3. Appends the automation module (automation-worker.js) at the end of the file.
+Your chat, analytics, /admin/stats and /admin/workflows code is not touched.
+Stops with an error (and writes nothing) if it cannot find the exact places to insert.
+"""
+import re
+import sys
+from pathlib import Path
+
+MARK = "ALPHA-O Automation (isolated)"
+
+HOOK = '''    // ALPHA-O Automation (isolated): must stay ABOVE the catch-all chat POST below.
+    if (path.startsWith("/api/automation") || path.startsWith("/admin/automation")) {
+      return automationHandle(request, env, ctx, cors, url, path);
+    }
+
+'''
+TICK = '''    // ALPHA-O Automation scheduler: only for its own cron; any other cron runs the original cleanup below.
+    if (controller && controller.cron === AUTO_CRON) {
+      ctx.waitUntil(automationTick(env));
+      return;
+    }
+
+'''
+
+
+def fail(msg):
+    print("ERROR: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail("Usage: python3 apply-worker-patch.py path/to/your-worker.js")
+    src_path = Path(sys.argv[1])
+    module_path = Path(__file__).with_name("automation-worker.js")
+    if not src_path.is_file():
+        fail(f"Cannot find {src_path}")
+    if not module_path.is_file():
+        fail("automation-worker.js must be in the same folder as this script.")
+    src = src_path.read_text(encoding="utf-8")
+    if MARK in src or "automationHandle" in src:
+        fail("This file already contains the automation integration. Nothing changed.")
+
+    post_guard = re.compile(r'^([ \t]*)if \(request\.method !== "POST"\) \{\s*\n\s*return send\(\{ error: "Use POST" \}, 405, cors\);\s*\n\s*\}', re.M)
+    found = post_guard.findall(src)
+    if len(found) != 1:
+        fail('Could not find exactly one `if (request.method !== "POST") { return send({ error: "Use POST" }, 405, cors); }` block. No changes made.')
+    src = post_guard.sub(lambda m: HOOK + m.group(0), src, count=1)
+
+    sched = re.compile(r'(async scheduled\(controller, env, ctx\) \{\s*\n)')
+    if len(sched.findall(src)) != 1:
+        fail("Could not find exactly one `async scheduled(controller, env, ctx) {` handler. No changes made.")
+    src = sched.sub(lambda m: m.group(1) + TICK, src, count=1)
+
+    module = module_path.read_text(encoding="utf-8")
+    out = src.rstrip() + "\n\n" + module.strip() + "\n"
+    dest = src_path.with_name(src_path.stem + ".patched" + src_path.suffix)
+    dest.write_text(out, encoding="utf-8")
+    print(f"OK: wrote {dest}")
+    print("Review the 2 inserted blocks (search for 'ALPHA-O Automation') and the appended module, then deploy.")
+
+
+if __name__ == "__main__":
+    main()

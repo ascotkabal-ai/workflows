@@ -1,0 +1,186 @@
+"use strict";
+/* ALPHA-O Automate: visual workflow builder canvas.
+ * Produces the SAME definition (alphaO.workflow.v2) that the server engine executes.
+ * Depends on alphao-core.js (window.AlphaOCore). Exposes window.AlphaOBuilder. */
+(() => {
+  const C = window.AlphaOCore;
+  if (!C) { console.error("Alpha-O Builder: alphao-core.js did not load."); return; }
+  const NS = "http://www.w3.org/2000/svg";
+  const W = 210, H = 66, MIN_K = 0.3, MAX_K = 2, HIST = 60;
+  const GROUP_COLOR = { Triggers: "#4fd3ff", Conditions: "#ffc857", Actions: "#55d6a0", Control: "#8fa8ff" };
+
+  function s(tag, attrs, ...kids) {
+    const el = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined && v !== false) el.setAttribute(k, v);
+    kids.flat().forEach(c => { if (c) el.append(c.nodeType ? c : document.createTextNode(String(c))); });
+    return el;
+  }
+  const trunc = (t, n) => (String(t).length > n ? String(t).slice(0, n - 1) + "…" : String(t));
+
+  function create(opts) {
+    const root = opts.container;
+    const toast = opts.toast || (() => {});
+    let def = { nodes: [], edges: [], settings: {} };
+    let view = { x: 40, y: 40, k: 1 };
+    let sel = null, errors = {}, hist = [], redo = [], mode = null, seq = 0, pending = false;
+
+    const svg = s("svg", { class: "apb-svg", tabindex: "0", role: "application", "aria-label": "Workflow canvas. Select a step to edit it. Press Delete to remove it." });
+    const defs = s("defs", {}, s("marker", { id: "apb-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" }, s("path", { d: "M0 0L10 5L0 10z", fill: "currentColor" })));
+    const vp = s("g"), edgesG = s("g"), nodesG = s("g"), tempG = s("g");
+    vp.append(edgesG, nodesG, tempG); svg.append(defs, vp); root.replaceChildren(svg);
+    const empty = document.createElement("div"); empty.className = "apb-empty"; empty.innerHTML = ""; empty.append(Object.assign(document.createElement("p"), { textContent: "Your canvas is empty." }), Object.assign(document.createElement("p"), { className: "ap-muted", textContent: "Add a trigger from the left, or ask ALPHA-O AUTOMATE AI to build the workflow for you." })); root.append(empty);
+
+    const spec = t => C.NODE_TYPES[t] || { label: t, group: "Control", fields: [] };
+    const find = id => def.nodes.find(n => n.id === id);
+    const snapshot = () => JSON.stringify(def);
+    function changed() { if (pending) return; pending = true; Promise.resolve().then(() => { pending = false; draw(); if (opts.onChange) opts.onChange(api.getDefinition()); }); }
+    function push() { hist.push(snapshot()); if (hist.length > HIST) hist.shift(); redo = []; }
+    function newId(prefix) { let id; do { id = prefix + (++seq); } while (def.nodes.some(n => n.id === id)); return id; }
+    const outPort = (n, kind) => ({ x: kind === "error" ? n.x + W / 2 : n.x + W, y: kind === "error" ? n.y + H : kind === "true" ? n.y + 24 : kind === "false" ? n.y + 46 : n.y + H / 2 });
+    const inPort = n => ({ x: n.x, y: n.y + H / 2 });
+
+    function edgePath(e) {
+      const a = find(e.from), b = find(e.to); if (!a || !b) return "";
+      const p = outPort(a, e.branch === "true" || e.branch === "false" || e.branch === "error" ? e.branch : "default"), q = inPort(b);
+      if (e.branch === "error") return `M${p.x} ${p.y} C${p.x} ${p.y + 70},${q.x - 70} ${q.y},${q.x} ${q.y}`;
+      const dx = Math.max(50, Math.abs(q.x - p.x) / 2);
+      return `M${p.x} ${p.y} C${p.x + dx} ${p.y},${q.x - dx} ${q.y},${q.x} ${q.y}`;
+    }
+
+    function draw() {
+      vp.setAttribute("transform", `translate(${view.x} ${view.y}) scale(${view.k})`);
+      empty.hidden = def.nodes.length > 0;
+      edgesG.replaceChildren(...def.edges.map(e => {
+        const d = edgePath(e); const a = find(e.from), b = find(e.to); if (!d) return s("g");
+        const color = e.branch === "error" ? "#ff7d88" : e.branch === "true" ? "#55d6a0" : e.branch === "false" ? "#ffc857" : "#7f9bb5";
+        const mid = a && b ? { x: (outPort(a, "default").x + inPort(b).x) / 2, y: (outPort(a, "default").y + inPort(b).y) / 2 } : { x: 0, y: 0 };
+        const on = sel && sel.kind === "edge" && sel.id === e.id;
+        return s("g", { class: "apb-edge" + (on ? " selected" : ""), style: `color:${color}` },
+          s("path", { d, class: "apb-edge-line", fill: "none", stroke: "currentColor", "stroke-width": on ? 3 : 2, "stroke-dasharray": e.branch === "error" ? "6 5" : null, "marker-end": "url(#apb-arrow)" }),
+          e.branch ? s("text", { x: mid.x, y: mid.y - 6, class: "apb-edge-label", "text-anchor": "middle", fill: "currentColor" }, e.branch) : null,
+          s("path", { d, fill: "none", stroke: "transparent", "stroke-width": 16, "data-edge": e.id, style: "cursor:pointer" }));
+      }));
+      nodesG.replaceChildren(...def.nodes.map(n => {
+        const sp = spec(n.type), color = GROUP_COLOR[sp.group] || "#7f9bb5", errs = errors[n.id] || [], on = sel && sel.kind === "node" && sel.id === n.id;
+        const isCond = n.type === "condition.if", isEnd = n.type === "control.end" || n.type === "control.stop", isTrig = C.isTrigger(n.type);
+        const g = s("g", { class: "apb-node" + (on ? " selected" : "") + (errs.length ? " has-error" : "") + (sp.disabled ? " disabled" : ""), transform: `translate(${n.x} ${n.y})`, "data-node": n.id },
+          s("title", {}, errs.length ? errs.join("\n") : sp.info || sp.label),
+          s("rect", { class: "apb-card", width: W, height: H, rx: 12 }),
+          s("rect", { width: 6, height: H, rx: 3, fill: color }),
+          s("text", { class: "apb-title", x: 18, y: 27 }, trunc(n.label, 24)),
+          s("text", { class: "apb-sub", x: 18, y: 47 }, trunc(sp.label + (sp.disabled ? " · needs integration" : ""), 30)),
+          errs.length ? s("g", { transform: `translate(${W - 18} 4)` }, s("circle", { r: 9, cx: 0, cy: 9, fill: "#ff7d88" }), s("text", { x: 0, y: 13, "text-anchor": "middle", class: "apb-badge" }, String(errs.length))) : null,
+          isTrig ? null : s("circle", { class: "apb-port in", cx: 0, cy: H / 2, r: 6, "data-in": n.id }));
+        if (!isEnd) {
+          if (isCond) {
+            g.append(s("circle", { class: "apb-port out t", cx: W, cy: 24, r: 6, "data-out": n.id, "data-kind": "true" }), s("text", { x: W - 12, y: 28, class: "apb-port-label", "text-anchor": "end" }, "true"),
+              s("circle", { class: "apb-port out f", cx: W, cy: 46, r: 6, "data-out": n.id, "data-kind": "false" }), s("text", { x: W - 12, y: 50, class: "apb-port-label", "text-anchor": "end" }, "false"));
+          } else g.append(s("circle", { class: "apb-port out", cx: W, cy: H / 2, r: 6, "data-out": n.id, "data-kind": "default" }));
+          g.append(s("circle", { class: "apb-port err", cx: W / 2, cy: H, r: 5, "data-out": n.id, "data-kind": "error" }, s("title", {}, "Drag to another step to set a failure path")));
+        }
+        return g;
+      }));
+    }
+
+    function world(ev) { const r = svg.getBoundingClientRect(); return { x: (ev.clientX - r.left - view.x) / view.k, y: (ev.clientY - r.top - view.y) / view.k }; }
+    function canConnect(from, to, branch) {
+      if (from === to) return "A step cannot connect to itself.";
+      const t = find(to), f = find(from); if (!t || !f) return "Missing step.";
+      if (C.isTrigger(t.type)) return "Triggers can't receive connections.";
+      if (def.edges.some(e => e.from === from && e.to === to && (e.branch || "") === (branch === "default" ? "" : branch))) return "That connection already exists.";
+      const cand = def.edges.concat([{ from, to }]);
+      if (!C.topoOrder(def.nodes, cand)) return "That would create a loop. Use the retry setting instead.";
+      return "";
+    }
+    function connect(from, to, kind) {
+      const msg = canConnect(from, to, kind); if (msg) { toast(msg, "warn"); return false; }
+      push(); const e = { id: newId("e"), from, to }; if (kind !== "default") e.branch = kind;
+      def.edges.push(e); sel = { kind: "edge", id: e.id }; changed(); notifySelect(); return true;
+    }
+    function notifySelect() { if (opts.onSelect) opts.onSelect(sel ? { ...sel } : null); }
+
+    svg.addEventListener("pointerdown", ev => {
+      if (ev.button !== undefined && ev.button > 0) return;
+      const out = ev.target.closest("[data-out]"), node = ev.target.closest("[data-node]"), edge = ev.target.closest("[data-edge]");
+      svg.focus({ preventScroll: true }); svg.setPointerCapture(ev.pointerId);
+      if (out) { mode = { type: "connect", from: out.dataset.out, kind: out.dataset.kind }; ev.preventDefault(); return; }
+      if (node) { const n = find(node.dataset.node); sel = { kind: "node", id: n.id }; const w = world(ev); mode = { type: "drag", id: n.id, dx: w.x - n.x, dy: w.y - n.y, moved: false }; draw(); notifySelect(); return; }
+      if (edge) { sel = { kind: "edge", id: edge.dataset.edge }; draw(); notifySelect(); return; }
+      sel = null; mode = { type: "pan", sx: ev.clientX, sy: ev.clientY, vx: view.x, vy: view.y }; draw(); notifySelect();
+    });
+    svg.addEventListener("pointermove", ev => {
+      if (!mode) return;
+      if (mode.type === "pan") { view.x = mode.vx + ev.clientX - mode.sx; view.y = mode.vy + ev.clientY - mode.sy; vp.setAttribute("transform", `translate(${view.x} ${view.y}) scale(${view.k})`); }
+      else if (mode.type === "drag") { const n = find(mode.id), w = world(ev); if (!mode.moved) { push(); mode.moved = true; } n.x = Math.round((w.x - mode.dx) / 10) * 10; n.y = Math.round((w.y - mode.dy) / 10) * 10; draw(); }
+      else if (mode.type === "connect") { const a = find(mode.from), p = outPort(a, mode.kind), w = world(ev); tempG.replaceChildren(s("path", { d: `M${p.x} ${p.y} L${w.x} ${w.y}`, stroke: "#4fd3ff", "stroke-width": 2, "stroke-dasharray": "4 4", fill: "none" })); }
+    });
+    function endPointer(ev) {
+      if (!mode) return; const m = mode; mode = null; tempG.replaceChildren();
+      if (m.type === "drag" && m.moved) changed();
+      if (m.type === "connect") { const el = document.elementFromPoint(ev.clientX, ev.clientY), target = el && el.closest ? el.closest("[data-node]") : null; if (target) connect(m.from, target.dataset.node, m.kind); }
+    }
+    svg.addEventListener("pointerup", endPointer); svg.addEventListener("pointercancel", endPointer);
+    svg.addEventListener("wheel", ev => { ev.preventDefault(); zoomAt(ev.deltaY < 0 ? 1.1 : 0.9, ev.clientX, ev.clientY); }, { passive: false });
+    function zoomAt(f, cx, cy) {
+      const r = svg.getBoundingClientRect(), px = (cx ?? r.left + r.width / 2) - r.left, py = (cy ?? r.top + r.height / 2) - r.top, k = Math.min(MAX_K, Math.max(MIN_K, view.k * f));
+      view.x = px - (px - view.x) * (k / view.k); view.y = py - (py - view.y) * (k / view.k); view.k = k; draw();
+    }
+    svg.addEventListener("keydown", ev => {
+      const mod = ev.ctrlKey || ev.metaKey;
+      if ((ev.key === "Delete" || ev.key === "Backspace") && sel) { ev.preventDefault(); api.deleteSelection(); }
+      else if (mod && ev.key.toLowerCase() === "z") { ev.preventDefault(); ev.shiftKey ? api.redo() : api.undo(); }
+      else if (mod && ev.key.toLowerCase() === "y") { ev.preventDefault(); api.redo(); }
+      else if (mod && ev.key.toLowerCase() === "d" && sel && sel.kind === "node") { ev.preventDefault(); api.duplicateNode(sel.id); }
+    });
+    root.addEventListener("dragover", ev => { if (ev.dataTransfer && ev.dataTransfer.types.includes("text/x-alphao-node")) ev.preventDefault(); });
+    root.addEventListener("drop", ev => { const t = ev.dataTransfer && ev.dataTransfer.getData("text/x-alphao-node"); if (!t) return; ev.preventDefault(); const w = world(ev); api.addNode(t, Math.round((w.x - W / 2) / 10) * 10, Math.round((w.y - H / 2) / 10) * 10); });
+
+    const api = {
+      getDefinition() { return { schema: C.SCHEMA, settings: C.clone(def.settings || {}), nodes: C.clone(def.nodes), edges: C.clone(def.edges) }; },
+      setDefinition(d, o = {}) {
+        def = { nodes: C.clone(d.nodes || []), edges: C.clone(d.edges || []), settings: C.clone(d.settings || {}) };
+        def.nodes.forEach(n => { n.config = n.config || {}; n.x = Number(n.x) || 0; n.y = Number(n.y) || 0; });
+        seq = 0; sel = null; if (o.resetHistory !== false) { hist = []; redo = []; } if (o.fit !== false) api.fit(); changed(); notifySelect();
+      },
+      addNode(type, x, y) {
+        const sp = C.NODE_TYPES[type]; if (!sp) return null;
+        if (C.isTrigger(type) && def.nodes.some(n => C.isTrigger(n.type))) { toast("A workflow can have only one trigger. Delete the current one first.", "warn"); return null; }
+        push(); const r = svg.getBoundingClientRect(); const cx = (r.width / 2 - view.x) / view.k, cy = (r.height / 2 - view.y) / view.k;
+        const off = def.nodes.length * 12 % 120; const DEF = { priority: "normal", mode: "set", category: "info", outcome: "completed", operator: "equals", integration: "email", event: "workflow.completed", operation: "set" };
+        const config = {}; sp.fields.forEach(f => { config[f.key] = f.kind === "select" ? DEF[f.key] || "" : ""; });
+        const n = { id: newId(type.startsWith("trigger") ? "t" : type.startsWith("condition") ? "c" : type.startsWith("control") ? "x" : "a"), type, label: sp.label, x: x ?? Math.round((cx - W / 2 + off) / 10) * 10, y: y ?? Math.round((cy - H / 2 + off) / 10) * 10, config };
+        def.nodes.push(n); sel = { kind: "node", id: n.id }; changed(); notifySelect(); return n;
+      },
+      updateNode(id, patch) { const n = find(id); if (!n) return; push(); if (patch.label !== undefined) n.label = patch.label; if (patch.config) n.config = { ...n.config, ...patch.config }; if (patch.on_error !== undefined) { if (patch.on_error) n.on_error = patch.on_error; else delete n.on_error; } changed(); },
+      updateEdge(id, patch) { const e = def.edges.find(x => x.id === id); if (!e) return; const branch = patch.branch === "" ? undefined : patch.branch; const from = find(e.from); if (from && from.type === "condition.if" && branch !== "true" && branch !== "false" && branch !== "error") { toast("Paths from an If / else step must be true, false or failure.", "warn"); return; } push(); if (branch) e.branch = branch; else delete e.branch; changed(); },
+      updateSettings(fn) { push(); const st = C.clone(def.settings || {}); fn(st); def.settings = st; changed(); },
+      deleteSelection() { if (!sel) return; push(); if (sel.kind === "node") { def.nodes = def.nodes.filter(n => n.id !== sel.id); def.edges = def.edges.filter(e => e.from !== sel.id && e.to !== sel.id); } else def.edges = def.edges.filter(e => e.id !== sel.id); sel = null; changed(); notifySelect(); },
+      duplicateNode(id) { const n = find(id); if (!n) return; if (C.isTrigger(n.type)) { toast("Only one trigger is allowed.", "warn"); return; } push(); const c = C.clone(n); c.id = newId("a"); c.x += 40; c.y += 80; c.label = trunc(n.label + " copy", 60); def.nodes.push(c); sel = { kind: "node", id: c.id }; changed(); notifySelect(); },
+      undo() { if (!hist.length) return; redo.push(snapshot()); def = JSON.parse(hist.pop()); sel = null; changed(); notifySelect(); },
+      redo() { if (!redo.length) return; hist.push(snapshot()); def = JSON.parse(redo.pop()); sel = null; changed(); notifySelect(); },
+      canUndo: () => hist.length > 0, canRedo: () => redo.length > 0,
+      selected: () => (sel ? { ...sel } : null), getNode: id => { const n = find(id); return n ? C.clone(n) : null; }, getEdge: id => { const e = def.edges.find(x => x.id === id); return e ? C.clone(e) : null; },
+      select(id) { sel = id ? { kind: "node", id } : null; draw(); notifySelect(); },
+      markErrors(map) { errors = map || {}; draw(); },
+      zoom(f) { zoomAt(f); }, zoomLevel: () => view.k,
+      fit() {
+        if (!def.nodes.length) { view = { x: 40, y: 40, k: 1 }; draw(); return; }
+        const r = svg.getBoundingClientRect(); const w = r.width || 800, h = r.height || 500;
+        const x0 = Math.min(...def.nodes.map(n => n.x)), y0 = Math.min(...def.nodes.map(n => n.y)), x1 = Math.max(...def.nodes.map(n => n.x + W)), y1 = Math.max(...def.nodes.map(n => n.y + H));
+        const k = Math.min(1.2, Math.max(MIN_K, Math.min((w - 80) / (x1 - x0), (h - 80) / (y1 - y0)))); view = { k, x: (w - (x1 - x0) * k) / 2 - x0 * k, y: (h - (y1 - y0) * k) / 2 - y0 * k }; draw();
+      },
+      autoLayout() {
+        const order = C.topoOrder(def.nodes, def.edges); if (!order) { toast("Fix loops before arranging.", "warn"); return; } push();
+        const depth = {}; order.forEach(id => { depth[id] = depth[id] || 0; def.edges.filter(e => e.from === id).forEach(e => { depth[e.to] = Math.max(depth[e.to] || 0, depth[id] + 1); }); });
+        const rows = {}; order.forEach(id => { const d = depth[id]; rows[d] = (rows[d] || 0) + 1; const n = find(id); n.x = 40 + d * 270; n.y = 40 + (rows[d] - 1) * 130; });
+        changed(); setTimeout(api.fit, 0);
+      },
+      checkpoint() { push(); },
+      redraw: draw
+    };
+    new ResizeObserver(() => draw()).observe(root);
+    draw();
+    return api;
+  }
+  window.AlphaOBuilder = { create, NODE_W: W, NODE_H: H };
+})();

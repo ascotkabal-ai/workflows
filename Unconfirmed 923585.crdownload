@@ -1,0 +1,508 @@
+/* ALPHA-O Automation core (shared by the Worker and the browser).
+ * Pure logic only: no network, no storage, no eval. Workflow data is never executed as code. */
+const AlphaOCore = (() => {
+  "use strict";
+  const SCHEMA = "alphaO.workflow.v2";
+  const LIMITS = { nodes: 50, edges: 120, steps: 25, bytes: 65536, vars: 50, text: 500, long: 2000, value: 1000 };
+  const SENSITIVE = /pass(word|wd)?|secret|token|api[-_]?key|authorization|credential|private[-_]?key/i;
+  const isObj = v => v !== null && typeof v === "object" && !Array.isArray(v);
+  const trunc = (v, n) => { const s = String(v); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+  const clone = v => JSON.parse(JSON.stringify(v));
+  const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+
+  function redact(value, depth = 0) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    if (typeof value === "string") return trunc(value, LIMITS.text);
+    if (Array.isArray(value)) return depth >= 4 ? "[truncated]" : value.slice(0, 20).map(i => redact(i, depth + 1));
+    if (typeof value === "object") {
+      if (depth >= 4) return "[truncated]";
+      const out = {};
+      Object.keys(value).slice(0, 40).forEach(k => { out[k] = SENSITIVE.test(k) ? "[REDACTED]" : redact(value[k], depth + 1); });
+      return out;
+    }
+    return null;
+  }
+
+  /* ---------------- Conditions (same grammar as the browser engine v0.1) ---------------- */
+  const OPERATORS = [
+    ["equals", "is"], ["not-equals", "is not"], ["gt", ">"], ["gte", ">="], ["lt", "<"], ["lte", "<="],
+    ["contains", "contains"], ["not-contains", "does not contain"], ["starts-with", "starts with"],
+    ["ends-with", "ends with"], ["is-empty", "is empty"], ["is-not-empty", "is not empty"],
+    ["exists", "exists"], ["not-exists", "does not exist"]
+  ];
+  const OP_KEYS = OPERATORS.map(o => o[0]);
+  const VALUELESS = new Set(["is-empty", "is-not-empty", "exists", "not-exists"]);
+  const CONDITION_HELP = "Format: <field> <operator> <value>, joined with AND / OR (AND binds first; no parentheses). " +
+    "Operators: is, is not, =, !=, >, >=, <, <=, contains, not contains, starts with, ends with, is empty, is not empty, exists, does not exist.";
+  const FIELD = "[A-Za-z_][\\w.\\-]*";
+  const WORD_OPS = [["is not empty", "is-not-empty"], ["is empty", "is-empty"], ["does not exist", "not-exists"], ["exists", "exists"],
+    ["does not contain", "not-contains"], ["not contains", "not-contains"], ["contains", "contains"], ["starts with", "starts-with"],
+    ["ends with", "ends-with"], ["is not", "not-equals"], ["is", "equals"]];
+  const SYM_OPS = { "==": "equals", "=": "equals", "!=": "not-equals", ">=": "gte", "<=": "lte", ">": "gt", "<": "lt" };
+  const esc = t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const WORD_RE = new RegExp(`^(${FIELD})\\s+(${WORD_OPS.map(([w]) => esc(w)).join("|")})(?=\\s|$)\\s*(.*)$`, "i");
+  const SYM_RE = new RegExp(`^(${FIELD})\\s*(==|!=|>=|<=|=|>|<)\\s*(.+)$`);
+
+  class CoreError extends Error { constructor(code, message, retryable = false) { super(message); this.code = code; this.retryable = retryable; } }
+  class SyntaxErr extends Error {}
+
+  function splitOutside(text, kw) {
+    const parts = []; const sep = ` ${kw} `; let cur = ""; let q = null;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) { cur += c; if (c === q) q = null; continue; }
+      if (c === '"' || c === "'") { q = c; cur += c; continue; }
+      if (text.substr(i, sep.length).toUpperCase() === sep) { parts.push(cur); cur = ""; i += sep.length - 1; continue; }
+      cur += c;
+    }
+    if (q) throw new SyntaxErr("A quotation mark is not closed.");
+    parts.push(cur);
+    return parts;
+  }
+  const unquote = v => { const t = v.trim(); return t.length >= 2 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0] ? t.slice(1, -1) : t; };
+
+  function parseClause(raw) {
+    const text = raw.trim();
+    if (!text) throw new SyntaxErr("A condition has an empty part around AND / OR.");
+    let field, operator, valueText = "";
+    const w = text.match(WORD_RE);
+    if (w) { field = w[1]; const word = w[2].toLowerCase(); operator = WORD_OPS.find(([x]) => x === word)[1]; valueText = w[3]; }
+    else {
+      const s = text.match(SYM_RE);
+      if (!s) throw new SyntaxErr(`"${trunc(text, 80)}" is not in the supported format.`);
+      field = s[1]; operator = SYM_OPS[s[2]]; valueText = s[3];
+    }
+    const expected = unquote(valueText);
+    if (VALUELESS.has(operator)) { if (valueText.trim()) throw new SyntaxErr(`"${trunc(text, 80)}" should not have a value after the operator.`); }
+    else if (!expected && !/^(['"]).*\1$/.test(valueText.trim())) throw new SyntaxErr(`"${trunc(text, 80)}" needs a value to compare with.`);
+    return { raw: text, field, operator, expected };
+  }
+  const parseCondition = expr => splitOutside(expr.replace(/\s+/g, " ").trim(), "OR").map(o => splitOutside(o, "AND").map(parseClause));
+
+  function getField(input, path) {
+    let cur = input;
+    for (const seg of String(path).split(".")) {
+      if (cur === null || typeof cur !== "object") return { found: false };
+      const key = Object.prototype.hasOwnProperty.call(cur, seg) ? seg : Object.keys(cur).find(k => k.toLowerCase() === seg.toLowerCase());
+      if (key === undefined) return { found: false };
+      cur = cur[key];
+    }
+    return { found: true, value: cur };
+  }
+  const isEmpty = v => v === null || v === undefined || (typeof v === "string" && v.trim() === "") || (Array.isArray(v) && !v.length) || (isObj(v) && !Object.keys(v).length);
+  const toNum = v => (typeof v === "number" ? (Number.isFinite(v) ? v : NaN) : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
+  const shown = (k, v) => (SENSITIVE.test(k) ? "[REDACTED]" : v === null || v === undefined ? "(empty)" : trunc(typeof v === "object" ? JSON.stringify(v) : v, 200));
+
+  function evalClause(c, input) {
+    const r = { raw: c.raw, field: c.field, operator: c.operator, expected: c.expected, actual: null, result: null, error: null };
+    const f = getField(input, c.field);
+    if (f.found) r.actual = shown(c.field, f.value);
+    try {
+      const present = f.found && f.value !== null && f.value !== undefined;
+      if (c.operator === "exists") { r.result = present; return r; }
+      if (c.operator === "not-exists") { r.result = !present; return r; }
+      if (c.operator === "is-empty") { r.result = !f.found || isEmpty(f.value); return r; }
+      if (c.operator === "is-not-empty") { r.result = f.found && !isEmpty(f.value); return r; }
+      if (!f.found) throw new CoreError("MISSING_INPUT", `Input has no field "${c.field}".`);
+      const a = f.value, e = c.expected;
+      if (["equals", "not-equals"].includes(c.operator)) {
+        if (a !== null && typeof a === "object") throw new CoreError("INVALID_COMPARISON", `Field "${c.field}" is a list or object.`);
+        const an = toNum(a), en = toNum(e);
+        const eq = Number.isFinite(an) && Number.isFinite(en) ? an === en : String(a).toLowerCase() === e.toLowerCase();
+        r.result = c.operator === "equals" ? eq : !eq; return r;
+      }
+      if (["gt", "gte", "lt", "lte"].includes(c.operator)) {
+        const an = toNum(a), en = toNum(e);
+        if (!Number.isFinite(an) || !Number.isFinite(en)) throw new CoreError("INVALID_COMPARISON", `"${c.raw}" needs numbers on both sides.`);
+        r.result = c.operator === "gt" ? an > en : c.operator === "gte" ? an >= en : c.operator === "lt" ? an < en : an <= en; return r;
+      }
+      if (["contains", "not-contains"].includes(c.operator)) {
+        let has;
+        if (Array.isArray(a)) has = a.some(i => String(i).toLowerCase() === e.toLowerCase());
+        else if (a !== null && typeof a === "object") throw new CoreError("INVALID_COMPARISON", `Field "${c.field}" is an object.`);
+        else has = String(a).toLowerCase().includes(e.toLowerCase());
+        r.result = c.operator === "contains" ? has : !has; return r;
+      }
+      if (["starts-with", "ends-with"].includes(c.operator)) {
+        if (a !== null && typeof a === "object") throw new CoreError("INVALID_COMPARISON", `Field "${c.field}" is a list or object.`);
+        const t = String(a).toLowerCase(), n = e.toLowerCase();
+        r.result = c.operator === "starts-with" ? t.startsWith(n) : t.endsWith(n); return r;
+      }
+      throw new CoreError("UNSUPPORTED_OPERATOR", `Operator "${c.operator}" is not supported.`);
+    } catch (err) { r.result = null; r.error = err instanceof CoreError ? err.message : "Could not evaluate this clause."; return r; }
+  }
+
+  function evaluateCondition(expression, input) {
+    const text = typeof expression === "string" ? expression.trim() : "";
+    if (!text) return { status: "NOT_APPLICABLE", expression: "", clauses: [], summary: "No condition." };
+    let groups;
+    try { groups = parseCondition(text); }
+    catch (e) { if (e instanceof SyntaxErr) return { status: "UNSUPPORTED", expression: text, clauses: [], summary: `This condition cannot be evaluated: ${e.message}`, help: CONDITION_HELP }; throw e; }
+    const eg = groups.map(g => g.map(c => evalClause(c, input)));
+    const clauses = eg.flat(); const bad = clauses.find(c => c.error);
+    if (bad) return { status: "ERROR", expression: text, clauses, summary: `The condition could not be evaluated: ${bad.error}` };
+    const met = eg.some(g => g.every(c => c.result === true));
+    return { status: met ? "MET" : "NOT_MET", expression: text, clauses, summary: met ? "Condition is met." : "Condition is not met." };
+  }
+
+  /* ---------------- Templating and variables ---------------- */
+  function lookup(ctx, path) {
+    const parts = String(path).replace(/\[(\d+)\]/g, ".$1").split(".").filter(Boolean);
+    if (!parts.length) return undefined;
+    let cur, start = 0;
+    if (["input", "vars", "steps"].includes(parts[0])) { cur = ctx[parts[0]]; start = 1; } else cur = ctx.input;
+    for (let i = start; i < parts.length; i++) {
+      if (cur === null || typeof cur !== "object") return undefined;
+      const key = Object.prototype.hasOwnProperty.call(cur, parts[i]) ? parts[i] : Object.keys(cur).find(k => k.toLowerCase() === parts[i].toLowerCase());
+      if (key === undefined) return undefined;
+      cur = cur[key];
+    }
+    return cur;
+  }
+  const show = v => (v === undefined || v === null ? "" : typeof v === "object" ? trunc(JSON.stringify(redact(v)), 200) : String(v));
+  const resolve = (str, ctx) => trunc(String(str ?? "").replace(/\{\{\s*([\w.\-\[\]]+)\s*\}\}/g, (_, p) => (SENSITIVE.test(p) ? "[REDACTED]" : show(lookup(ctx, p)))), LIMITS.value);
+
+  /* ---------------- Node registry ---------------- */
+  const f = (key, label, kind, o = {}) => ({ key, label, kind, ...o });
+  const PRIORITIES = ["low", "normal", "high", "urgent"];
+  const NODE_TYPES = {
+    "trigger.manual": { group: "Triggers", label: "Manual start", info: "Starts when someone presses Run.", fields: [] },
+    "trigger.schedule": { group: "Triggers", label: "Schedule", info: "Starts at the times set in Workflow settings.", fields: [] },
+    "trigger.event": { group: "Triggers", label: "Internal event", info: "Starts when another workflow completes or fails.", fields: [
+      f("event", "Event", "select", { options: ["workflow.completed", "workflow.failed"], required: true }),
+      f("source_workflow_id", "Only from workflow ID (optional)", "text", { max: 80 })] },
+    "trigger.webhook": { group: "Triggers", label: "Webhook", info: "Starts when its private webhook address receives data.", fields: [] },
+    "trigger.external": { group: "Triggers", label: "External trigger (disabled)", disabled: true, info: "Needs an integration that is not connected.", fields: [
+      f("source", "Source", "text", { max: 60 })] },
+    "condition.if": { group: "Conditions", label: "If / else", info: "Sends the flow down the true or false path.", fields: [
+      f("field", "Field", "text", { max: 80, placeholder: "e.g. amount" }),
+      f("operator", "Operator", "select", { options: OP_KEYS }),
+      f("value", "Value", "text", { max: 200 }),
+      f("expression", "Or full expression (optional)", "text", { max: 500, placeholder: "priority is urgent AND amount > 100" })] },
+    "action.create_task": { group: "Actions", label: "Create task", info: "Adds a task to your Results list.", fields: [
+      f("title", "Task title", "text", { required: true, max: 120 }),
+      f("priority", "Priority", "select", { options: PRIORITIES }),
+      f("due", "Due (text)", "text", { max: 60 })] },
+    "action.update_data": { group: "Actions", label: "Update workflow data", info: "Stores a value that belongs to this workflow.", fields: [
+      f("key", "Data key", "text", { required: true, max: 40, pattern: /^[A-Za-z][\w.\-]{0,39}$/ }),
+      f("value", "Value", "text", { max: 300 }),
+      f("mode", "Mode", "select", { options: ["set", "append", "increment"] })] },
+    "action.notify": { group: "Actions", label: "In-platform notification", info: "Shows a message in your notification center.", fields: [
+      f("title", "Title", "text", { required: true, max: 120 }),
+      f("message", "Message", "textarea", { max: 500 }),
+      f("category", "Category", "select", { options: ["info", "success", "warning", "attention"] })] },
+    "action.report": { group: "Actions", label: "Generate report", info: "Saves a short report to your Results list.", fields: [
+      f("title", "Report title", "text", { required: true, max: 120 }),
+      f("fields", "Fields to include (comma separated, blank = all)", "text", { max: 300 })] },
+    "action.process": { group: "Actions", label: "Process information", info: "Calculates or formats values for later steps.", fields: [
+      f("operation", "Operation", "select", { options: ["set", "template", "sum", "average", "count", "uppercase", "lowercase"], required: true }),
+      f("target", "Save result as", "text", { required: true, max: 40, pattern: /^[A-Za-z][\w]{0,39}$/ }),
+      f("source", "Source field(s), comma separated", "text", { max: 300 }),
+      f("template", "Text / template", "textarea", { max: 500, placeholder: "Hello {{name}}" })] },
+    "action.external": { group: "Actions", label: "External service (disabled)", disabled: true, info: "Email, Slack, Sheets and similar need an integration that is not connected.", fields: [
+      f("integration", "Integration", "select", { options: ["email", "slack", "google-sheets", "microsoft", "other"] }),
+      f("note", "What it should do", "textarea", { max: 300 })] },
+    "control.stop": { group: "Control", label: "Stop", info: "Ends the run here.", fields: [
+      f("outcome", "Outcome", "select", { options: ["completed", "failed"] }),
+      f("message", "Message", "text", { max: 200 })] },
+    "control.end": { group: "Control", label: "Complete", info: "Marks the workflow as complete.", fields: [] }
+  };
+  const BRANCHES = new Set(["true", "false", "error"]);
+  const isTrigger = t => String(t).startsWith("trigger.");
+  const isDisabledType = t => Boolean(NODE_TYPES[t] && NODE_TYPES[t].disabled);
+
+  /* ---------------- Schedules ---------------- */
+  const fmtCache = {};
+  function parts(ms, tz) {
+    const fmt = fmtCache[tz] || (fmtCache[tz] = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" }));
+    const o = {}; fmt.formatToParts(new Date(ms)).forEach(p => { o[p.type] = Number(p.value); });
+    return o;
+  }
+  function zonedToUtc(y, mo, d, h, mi, tz) {
+    const naive = Date.UTC(y, mo - 1, d, h, mi);
+    let guess = naive;
+    for (let i = 0; i < 2; i++) { const p = parts(guess, tz); guess = naive - (Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - guess); }
+    return guess;
+  }
+  function validTimezone(tz) { try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; } }
+
+  function normalizeSchedule(raw, errors, label = "Schedule") {
+    if (!isObj(raw)) return null;
+    const kind = raw.kind;
+    const out = { kind, timezone: typeof raw.timezone === "string" && validTimezone(raw.timezone) ? raw.timezone : "UTC" };
+    if (raw.timezone && out.timezone !== raw.timezone) errors.push(`${label}: unknown time zone.`);
+    const time = String(raw.time || "09:00");
+    const okTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(time);
+    if (kind === "interval") {
+      const m = Math.floor(num(raw.every_minutes, 0));
+      if (m < 5 || m > 10080) errors.push(`${label}: interval must be between 5 and 10080 minutes.`);
+      out.every_minutes = Math.min(10080, Math.max(5, m || 60));
+    } else if (kind === "daily" || kind === "weekly" || kind === "monthly") {
+      if (!okTime) errors.push(`${label}: time must look like 09:30.`);
+      out.time = okTime ? time : "09:00";
+      if (kind === "weekly") {
+        const days = (Array.isArray(raw.days) ? raw.days : []).map(Number).filter(d => Number.isInteger(d) && d >= 0 && d <= 6);
+        if (!days.length) errors.push(`${label}: choose at least one weekday.`);
+        out.days = [...new Set(days)].sort();
+      }
+      if (kind === "monthly") {
+        const d = Math.floor(num(raw.day, 0));
+        if (d < 1 || d > 28) errors.push(`${label}: day of month must be 1–28.`);
+        out.day = Math.min(28, Math.max(1, d || 1));
+      }
+    } else if (kind === "once") {
+      const at = Date.parse(raw.at);
+      if (!Number.isFinite(at)) errors.push(`${label}: choose a date and time.`);
+      out.at = Number.isFinite(at) ? new Date(at).toISOString() : null;
+    } else { errors.push(`${label}: unknown schedule type.`); return null; }
+    return out;
+  }
+
+  /** Next run strictly after `after`. Missed runs are skipped, not replayed. Returns ms or null. */
+  function nextRunAfter(s, after, now = after) {
+    const base = Math.max(after, now);
+    if (s.kind === "once") { const at = Date.parse(s.at); return at > after ? at : null; }
+    if (s.kind === "interval") { const step = s.every_minutes * 60000; return after + (Math.floor((Math.max(now, after) - after) / step) + 1) * step; }
+    const tz = s.timezone || "UTC";
+    const [h, mi] = s.time.split(":").map(Number);
+    const p = parts(base, tz);
+    for (let i = 0; i < 400; i++) {
+      const d = new Date(Date.UTC(p.year, p.month - 1, p.day + i));
+      const y = d.getUTCFullYear(), mo = d.getUTCMonth() + 1, day = d.getUTCDate(), wd = d.getUTCDay();
+      if (s.kind === "weekly" && !s.days.includes(wd)) continue;
+      if (s.kind === "monthly" && day !== s.day) continue;
+      const t = zonedToUtc(y, mo, day, h, mi, tz);
+      if (t > base) return t;
+    }
+    return null;
+  }
+
+  /* ---------------- Validation ---------------- */
+  function normalizeConfig(spec, raw, label, errors, nodeErrs) {
+    const cfg = {}; const src = isObj(raw) ? raw : {};
+    for (const fld of spec.fields) {
+      let v = src[fld.key];
+      if (v === undefined || v === null) v = "";
+      if (fld.kind === "select") {
+        v = String(v);
+        if (v && !fld.options.includes(v)) { const m = `${label}: "${trunc(v, 30)}" is not a valid ${fld.label.toLowerCase()}.`; errors.push(m); nodeErrs.push(m); v = ""; }
+      } else v = trunc(String(v).trim(), fld.max || LIMITS.text);
+      if (fld.pattern && v && !fld.pattern.test(v)) { const m = `${label}: ${fld.label.toLowerCase()} has unsupported characters.`; errors.push(m); nodeErrs.push(m); v = ""; }
+      if (fld.required && !v) { const m = `${label}: ${fld.label.toLowerCase()} is required.`; errors.push(m); nodeErrs.push(m); }
+      cfg[fld.key] = v;
+    }
+    return cfg;
+  }
+
+  function topoOrder(nodes, edges) {
+    const indeg = new Map(nodes.map(n => [n.id, 0])); const out = new Map(nodes.map(n => [n.id, []]));
+    edges.forEach(e => { indeg.set(e.to, indeg.get(e.to) + 1); out.get(e.from).push(e.to); });
+    const q = nodes.filter(n => indeg.get(n.id) === 0).map(n => n.id); const order = [];
+    while (q.length) { const id = q.shift(); order.push(id); out.get(id).forEach(t => { indeg.set(t, indeg.get(t) - 1); if (indeg.get(t) === 0) q.push(t); }); }
+    return order.length === nodes.length ? order : null;
+  }
+
+  function normalizeSettings(raw, errors) {
+    const s = isObj(raw) ? raw : {};
+    const r = isObj(s.retry) ? s.retry : {};
+    const ma = Math.floor(num(r.max_attempts, 1));
+    const iv = Math.floor(num(r.interval_seconds, 60));
+    const out = {
+      retry: { max_attempts: Math.min(5, Math.max(1, ma)), interval_seconds: Math.min(86400, Math.max(30, iv)), backoff: r.backoff === "exponential" ? "exponential" : "fixed" },
+      notify: { success: !(isObj(s.notify) && s.notify.success === false), failure: !(isObj(s.notify) && s.notify.failure === false) }
+    };
+    if (ma < 1 || ma > 5) errors.push("Retry attempts must be between 1 and 5.");
+    if (s.schedule) out.schedule = normalizeSchedule(s.schedule, errors);
+    return out;
+  }
+
+  function validateDefinition(raw, opts = {}) {
+    const errors = [], warnings = [], nodeErrors = {}; const act = Boolean(opts.activation);
+    const fail = (m, id) => { errors.push(m); if (id) (nodeErrors[id] = nodeErrors[id] || []).push(m); };
+    if (!isObj(raw)) return { ok: false, errors: ["The workflow definition must be an object."], warnings, nodeErrors, definition: null };
+    try { if (JSON.stringify(raw).length > LIMITS.bytes) errors.push("The workflow is too large (64 KB maximum)."); } catch { errors.push("The workflow could not be read."); }
+    const rawNodes = Array.isArray(raw.nodes) ? raw.nodes : [], rawEdges = Array.isArray(raw.edges) ? raw.edges : [];
+    if (!rawNodes.length) errors.push("Add at least one step.");
+    if (rawNodes.length > LIMITS.nodes) errors.push(`A workflow can have at most ${LIMITS.nodes} steps.`);
+    if (rawEdges.length > LIMITS.edges) errors.push(`A workflow can have at most ${LIMITS.edges} connections.`);
+    const nodes = [], ids = new Set();
+    rawNodes.slice(0, LIMITS.nodes).forEach((rn, i) => {
+      if (!isObj(rn)) { errors.push(`Step ${i + 1} is not valid.`); return; }
+      const id = String(rn.id || "").trim();
+      if (!/^[A-Za-z0-9_-]{1,40}$/.test(id)) { errors.push(`Step ${i + 1} has an invalid id.`); return; }
+      if (ids.has(id)) { errors.push(`Step id "${id}" is used twice.`); return; }
+      const spec = NODE_TYPES[rn.type];
+      if (!spec) { errors.push(`Step "${id}" has an unknown type.`); return; }
+      ids.add(id);
+      const label = trunc(String(rn.label || spec.label), 60);
+      const ne = []; const cfg = normalizeConfig(spec, rn.config, `"${label}"`, errors, ne); if (ne.length) nodeErrors[id] = ne;
+      const node = { id, type: rn.type, label, x: Math.round(num(rn.x)), y: Math.round(num(rn.y)), config: cfg };
+      if (rn.on_error === "continue" || rn.on_error === "stop") node.on_error = rn.on_error;
+      if (spec.disabled) { const m = `"${label}" needs an integration that is not connected, so this workflow cannot be activated.`; if (act) fail(m, id); else warnings.push(m); }
+      if (rn.type === "condition.if" && !cfg.expression && !(cfg.field && cfg.operator)) fail(`"${label}": set a field and operator, or write an expression.`, id);
+      if (rn.type === "condition.if" && !cfg.expression && cfg.operator && !VALUELESS.has(cfg.operator) && cfg.value === "") fail(`"${label}": enter a value to compare with.`, id);
+      if (rn.type === "condition.if" && cfg.expression) { try { parseCondition(cfg.expression); } catch (e) { fail(`"${label}": ${e.message}`, id); } }
+      if (rn.type === "action.process" && ["sum", "average", "count"].includes(cfg.operation) && !cfg.source) fail(`"${label}": choose the source field(s).`, id);
+      if (rn.type === "action.process" && ["set", "template"].includes(cfg.operation) && !cfg.template && !cfg.source) fail(`"${label}": enter text or a source field.`, id);
+      nodes.push(node);
+    });
+    const byId = new Map(nodes.map(n => [n.id, n])); const edges = []; const seen = new Set();
+    rawEdges.slice(0, LIMITS.edges).forEach((re, i) => {
+      if (!isObj(re)) return;
+      const from = String(re.from || ""), to = String(re.to || ""), branch = re.branch === undefined || re.branch === null || re.branch === "" ? undefined : String(re.branch);
+      if (!byId.has(from) || !byId.has(to)) { errors.push(`Connection ${i + 1} points to a missing step.`); return; }
+      if (from === to) { fail(`"${byId.get(from).label}" cannot connect to itself.`, from); return; }
+      if (branch !== undefined && !BRANCHES.has(branch)) { errors.push(`Connection ${i + 1} has an unknown branch.`); return; }
+      const key = `${from}|${to}|${branch || ""}`; if (seen.has(key)) return; seen.add(key);
+      const e = { id: trunc(String(re.id || `e${i + 1}`).replace(/[^A-Za-z0-9_-]/g, ""), 40) || `e${i + 1}`, from, to }; if (branch) e.branch = branch; edges.push(e);
+    });
+    const triggers = nodes.filter(n => isTrigger(n.type));
+    if (triggers.length !== 1) errors.push(triggers.length ? "Use only one trigger." : "Add a trigger to start the workflow.");
+    edges.forEach(e => {
+      const from = byId.get(e.from), to = byId.get(e.to);
+      if (isTrigger(to.type)) fail(`"${to.label}" is a trigger and cannot receive connections.`, to.id);
+      if (from.type === "condition.if" && e.branch !== "true" && e.branch !== "false" && e.branch !== "error") fail(`"${from.label}": every connection must be a true or false path.`, from.id);
+      if (from.type !== "condition.if" && (e.branch === "true" || e.branch === "false")) fail(`"${from.label}": only If / else steps have true or false paths.`, from.id);
+      if (from.type === "control.end" || from.type === "control.stop") fail(`"${from.label}" ends the workflow and cannot connect onward.`, from.id);
+    });
+    nodes.filter(n => n.type === "condition.if").forEach(n => { if (!edges.some(e => e.from === n.id && e.branch !== "error")) fail(`"${n.label}" needs at least one outgoing path.`, n.id); });
+    if (nodes.length && !topoOrder(nodes, edges)) errors.push("The workflow contains a loop. Use the workflow retry setting instead of looping back.");
+    if (triggers.length === 1) {
+      const reach = new Set([triggers[0].id]); const q = [triggers[0].id];
+      while (q.length) { const id = q.shift(); edges.filter(e => e.from === id).forEach(e => { if (!reach.has(e.to)) { reach.add(e.to); q.push(e.to); } }); }
+      nodes.forEach(n => { if (!reach.has(n.id)) warnings.push(`"${n.label}" is not connected to the trigger and will never run.`); });
+      if (triggers[0].type === "trigger.external") { const m = "External triggers need an integration that is not connected."; act ? errors.push(m) : warnings.push(m); }
+    }
+    const settingsErrors = []; const settings = normalizeSettings(raw.settings, settingsErrors); settingsErrors.forEach(m => errors.push(m));
+    if (triggers[0] && triggers[0].type === "trigger.schedule" && !settings.schedule) { const m = "Set a schedule in Workflow settings."; act ? errors.push(m) : warnings.push(m); }
+    if (act && !nodes.some(n => n.type.startsWith("action."))) warnings.push("This workflow has no actions yet.");
+    const definition = { schema: SCHEMA, settings, nodes, edges };
+    return { ok: errors.length === 0, errors, warnings, nodeErrors, definition };
+  }
+
+  /* ---------------- Interpreter ---------------- */
+  function evalConditionNode(node, ctx) {
+    const c = node.config;
+    if (c.expression) {
+      const r = evaluateCondition(resolve(c.expression, ctx), ctx.input);
+      if (r.status === "UNSUPPORTED" || r.status === "ERROR") throw new CoreError("CONDITION_ERROR", r.summary);
+      return { result: r.status === "MET", summary: r.summary, output: { result: r.status === "MET", clauses: r.clauses.map(x => ({ raw: x.raw, actual: x.actual, result: x.result })) } };
+    }
+    const r = evalClause({ raw: `${c.field} ${c.operator} ${c.value}`, field: c.field, operator: c.operator, expected: resolve(c.value, ctx) }, ctx.input);
+    if (r.error) throw new CoreError("CONDITION_ERROR", r.error);
+    return { result: r.result === true, summary: `${c.field} ${(OPERATORS.find(o => o[0] === c.operator) || [0, c.operator])[1]} ${c.value} → ${r.result}`.trim(), output: { result: r.result === true, actual: r.actual } };
+  }
+
+  function setVar(ctx, name, value) {
+    if (!Object.prototype.hasOwnProperty.call(ctx.vars, name) && Object.keys(ctx.vars).length >= LIMITS.vars) throw new CoreError("VARIABLE_LIMIT", "Too many variables in one run.");
+    ctx.vars[name] = typeof value === "string" ? trunc(value, LIMITS.value) : value;
+  }
+
+  function processNode(node, ctx) {
+    const c = node.config; const list = String(c.source || "").split(",").map(s => s.trim()).filter(Boolean);
+    let value, summary;
+    if (c.operation === "set" || c.operation === "template") { value = c.template ? resolve(c.template, ctx) : show(lookup(ctx, list[0])); }
+    else if (c.operation === "uppercase" || c.operation === "lowercase") { const t = c.template ? resolve(c.template, ctx) : show(lookup(ctx, list[0])); value = c.operation === "uppercase" ? t.toUpperCase() : t.toLowerCase(); }
+    else {
+      const nums = list.map(p => toNum(lookup(ctx, p))).filter(Number.isFinite);
+      if (c.operation === "count") value = list.filter(p => !isEmpty(lookup(ctx, p))).length;
+      else if (!nums.length) throw new CoreError("MISSING_INPUT", "None of the source fields hold numbers.");
+      else value = c.operation === "sum" ? nums.reduce((a, b) => a + b, 0) : nums.reduce((a, b) => a + b, 0) / nums.length;
+      value = Math.round(value * 10000) / 10000;
+    }
+    setVar(ctx, c.target, value); summary = `${c.target} = ${trunc(String(value), 80)}`;
+    return { summary, output: { [c.target]: value } };
+  }
+
+  function topologicalOrderOrThrow(def) { const o = topoOrder(def.nodes, def.edges); if (!o) throw new CoreError("INVALID_WORKFLOW", "The workflow contains a loop."); return o; }
+
+  /** Runs a validated definition. hooks.runAction(node, ctx, resolved) performs (or simulates) side effects. */
+  async function executeGraph(def, input, hooks = {}) {
+    const order = topologicalOrderOrThrow(def);
+    const nodes = new Map(def.nodes.map(n => [n.id, n]));
+    const active = new Set(def.nodes.filter(n => isTrigger(n.type)).map(n => n.id));
+    const ctx = { input: isObj(input) ? clone(input) : {}, vars: {}, steps: {} };
+    const steps = []; let status = "Completed", error = null;
+    for (const id of order) {
+      if (!active.has(id)) continue;
+      if (steps.length >= LIMITS.steps) { status = "Failed"; error = { code: "STEP_LIMIT", message: `A run can execute at most ${LIMITS.steps} steps.`, retryable: false }; break; }
+      if (hooks.shouldCancel && (await hooks.shouldCancel())) { status = "Cancelled"; break; }
+      const node = nodes.get(id); const t0 = Date.now(); let res;
+      try {
+        if (isTrigger(node.type)) res = { summary: `Started by ${NODE_TYPES[node.type].label.toLowerCase()}.`, output: {} };
+        else if (node.type === "condition.if") res = evalConditionNode(node, ctx);
+        else if (node.type === "action.process") res = processNode(node, ctx);
+        else if (node.type === "control.end") res = { summary: "Workflow complete.", output: {} };
+        else if (node.type === "control.stop") res = { summary: node.config.message || "Stopped.", output: {}, stop: node.config.outcome === "failed" ? "failed" : "completed" };
+        else if (isDisabledType(node.type)) throw new CoreError("INTEGRATION_DISABLED", `"${node.label}" needs an integration that is not connected.`);
+        else if (hooks.runAction) res = await hooks.runAction(node, ctx);
+        else throw new CoreError("NO_HANDLER", "This step cannot run here.");
+      } catch (e) { res = { failed: true, error: { code: e.code || "STEP_ERROR", message: trunc(e.message || "Step failed.", 300), retryable: Boolean(e.retryable) } }; }
+      const step = { seq: steps.length + 1, nodeId: id, type: node.type, label: node.label, status: res.failed ? "Failed" : res.stop === "failed" ? "Failed" : "Completed",
+        startedAt: t0, finishedAt: Date.now(), durationMs: Date.now() - t0, summary: res.failed ? res.error.message : trunc(res.summary || "", 300),
+        error: res.failed ? res.error : res.stop === "failed" ? { code: "STOPPED", message: node.config.message || "Stopped by the workflow.", retryable: false } : null,
+        output: redact(res.output || {}) };
+      steps.push(step); ctx.steps[id] = res.output || {};
+      if (hooks.onStep) await hooks.onStep(step);
+      const outs = def.edges.filter(e => e.from === id);
+      if (res.failed) {
+        const errEdges = outs.filter(e => e.branch === "error");
+        if (errEdges.length) errEdges.forEach(e => active.add(e.to));
+        else if (node.on_error === "continue") outs.filter(e => e.branch !== "error").forEach(e => active.add(e.to));
+        else { status = "Failed"; error = { ...res.error, nodeId: id }; break; }
+        continue;
+      }
+      if (res.stop) { if (res.stop === "failed") { status = "Failed"; error = step.error; } break; }
+      if (node.type === "condition.if") outs.filter(e => e.branch === String(res.result)).forEach(e => active.add(e.to));
+      else outs.filter(e => e.branch !== "error" && e.branch !== "true" && e.branch !== "false").forEach(e => active.add(e.to));
+    }
+    return { status, error, steps, vars: ctx.vars, input: ctx.input };
+  }
+
+  /* ---------------- Legacy (flat v1) drafts → graph ---------------- */
+  const LEGACY_ACTIONS = {
+    "create-task": ["action.create_task", n => ({ title: n.name || "Task", priority: "normal" })],
+    notify: ["action.notify", n => ({ title: n.name || "Notification", message: n.description || "", category: "info" })],
+    summarize: ["action.report", n => ({ title: n.name || "Summary", fields: "" })],
+    "analyze-data": ["action.report", n => ({ title: n.name || "Report", fields: "" })],
+    "draft-email": ["action.external", n => ({ integration: "email", note: n.description || "Draft an email" })],
+    "process-file": ["action.external", n => ({ integration: "other", note: "Process a file" })]
+  };
+  const LEGACY_TRIGGERS = { manual: "trigger.manual", schedule: "trigger.schedule", webhook: "trigger.webhook" };
+  function legacyToGraph(w) {
+    const nodes = []; const edges = []; let x = 40;
+    const trig = LEGACY_TRIGGERS[w.trigger_type || w.trigger] || (w.trigger_type || w.trigger ? "trigger.external" : "trigger.manual");
+    nodes.push({ id: "t1", type: trig, label: NODE_TYPES[trig].label, x, y: 120, config: trig === "trigger.external" ? { source: String(w.trigger_type || w.trigger) } : {} });
+    let prev = "t1"; x += 240;
+    const cond = String(w.condition_text || w.condition || "").trim();
+    if (cond) { nodes.push({ id: "c1", type: "condition.if", label: "Condition", x, y: 120, config: { expression: cond } }); edges.push({ id: "e1", from: prev, to: "c1" }); prev = "c1"; x += 240; }
+    const map = LEGACY_ACTIONS[w.action_type || w.action] || LEGACY_ACTIONS.summarize;
+    nodes.push({ id: "a1", type: map[0], label: NODE_TYPES[map[0]].label, x, y: 120, config: map[1](w) });
+    edges.push({ id: "e2", from: prev, to: "a1", ...(prev === "c1" ? { branch: "true" } : {}) });
+    nodes.push({ id: "end", type: "control.end", label: "Complete", x: x + 240, y: 120, config: {} });
+    edges.push({ id: "e3", from: "a1", to: "end" });
+    if (prev === "c1") { nodes.push({ id: "end2", type: "control.end", label: "Condition not met", x, y: 260, config: {} }); edges.push({ id: "e4", from: "c1", to: "end2", branch: "false" }); }
+    const settings = {}; if (trig === "trigger.schedule") settings.schedule = { kind: "daily", time: "09:00", timezone: "UTC" };
+    return validateDefinition({ nodes, edges, settings }).definition;
+  }
+
+  function outline(def) {
+    if (!def || !Array.isArray(def.nodes)) return [];
+    const by = new Map(def.nodes.map(n => [n.id, n])); const lines = []; const seen = new Set();
+    const walk = (id, depth, tag) => {
+      const n = by.get(id); if (!n) return;
+      lines.push({ depth, tag, label: n.label, type: n.type, id });
+      if (seen.has(id)) return; seen.add(id);
+      def.edges.filter(e => e.from === id).forEach(e => walk(e.to, depth + 1, e.branch || ""));
+    };
+    def.nodes.filter(n => isTrigger(n.type)).forEach(n => walk(n.id, 0, ""));
+    return lines;
+  }
+
+  const api = { SCHEMA, LIMITS, NODE_TYPES, OPERATORS, OP_KEYS, CONDITION_HELP, SENSITIVE, isTrigger, isObj, trunc, clone, redact, resolve, lookup,
+    evaluateCondition, parseCondition, validateDefinition, executeGraph, legacyToGraph, outline, nextRunAfter, normalizeSchedule, validTimezone, CoreError, topoOrder };
+  if (typeof globalThis !== "undefined") globalThis.AlphaOCore = api;
+  return api;
+})();
